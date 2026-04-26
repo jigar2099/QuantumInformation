@@ -1,0 +1,27 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="Eslint" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="false" level="WARNING" enabled_by_default="false">
+      <option name="ignoredPackages">
+        <list>
+          <option value="transformers" />
+          <option value="datasets" />
+          <option value="sacrebleu" />
+          <option value="rouge_score" />
+          <option value="py7zr" />
+          <option value="nltk" />
+          <option value="matplotlib" />
+          <option value="torch" />
+          <option value="boto3" />
+          <option value="mypy-boto3-s3" />
+          <option value="python-box" />
+          <option value="ensure" />
+          <option value="fastapi" />
+          <option value="uvicorn" />
+          <option value="evaluate" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
