@@ -9,7 +9,7 @@ from qiskit.quantum_info import (Statevector, DensityMatrix, operators,
                                  partial_trace, Pauli, state_fidelity)
 
 from src.QuInfo.utils.DensityMatrix import (to_numpy_matrix, pretty_matrix, is_square_matrix, is_hermitian,
-                                            eigenvalues_of_matrix,
+                                            eigenvalues_of_matrix, densityMatrix_from_label, bloch_vector,
                                             is_positive_semidefinite, trace_of_matrix)
 
 np.set_printoptions(precision=4, suppress=True)
@@ -128,13 +128,242 @@ def normalize_statevector(state:VectorLike, tolerance:float=1e-10)->Complexvecto
     return vec/norm
 
 
+def standard_basis_projectors() -> list[ComplexMatrix]:
+    """
+    return computational basis projectors for one qubit
+    :return: list of |0><0| and |1><1|
+    NOTE: these projector define standard Z-basis measurement
+    """
+    ket_0 = np.array([1, 0], dtype=np.complex128)
+    ket_1 = np.array([0, 1], dtype=np.complex128)
+
+    return [
+        projector_from_state(ket_0),
+        projector_from_state(ket_1)
+    ]
 
 
+def povm_sum(povm_elements: POVM) -> ComplexMatrix:
+    """
+    sum all povm elements
+    :param povm_elements: seq of povem elements
+    :return: matrix sum of all povm elements
+    NOTE: valid povm must satisfy,
+    p0+p1+p2+...+pn = 1
+    """
+    if len(povm_elements) == 0:
+        raise ValueError("POVM list can not be empty")
+
+    matrices = [to_numpy_matrix(P) for P in povm_elements]
+    first_shape = matrices[0].shape
+
+    for idx, P in enumerate(matrices):
+        if P.shape != first_shape:
+            raise ValueError(
+                f"All POVM elements must have same shape"
+                f" but got {P.shape} and {matrices[0].shape} at index {idx}"
+            )
+    total = np.zeros(first_shape, dtype=np.complex128)
+
+    for P in matrices:
+        total += P
+    return total
 
 
+def validate_povm(povm_elements: POVM, tolerance: float = 1e-10, name: str = "POVM", verbose: bool = True) -> bool:
+    """
+    Validate whether a collection of matrices forms a POVM.
+    :param povm_elements: sequence of povmn elements
+    :param tolerance: numerical constraint
+    :param name: str, optional
+    :param verbose: bool, optional
+    :return: bool, if the input is a valid POVM
+    NOTE: povm describe the most general quantum measurements, for a quantum state,
+    rho, the probability of outcome 'a' is
+    p(a) = Tr(P_a rho)
+    besides povm should be hermitian, positive semidefinite, and sum of all elements equals the identity matrix
+    """
+    if len(povm_elements) == 0:
+        raise ValueError("POVM list can not be empty")
+
+    matrices = [to_numpy_matrix(P) for P in povm_elements]
+    dim = matrix_dimension(matrices[0])
+    identity = np.eye(dim, dtype=np.complex128)
+
+    all_hermitian = True
+    all_psd = True
+
+    if verbose:
+        print("=" * 60)
+        print(f"{name} validation report")
+        print("=" * 60)
+    for idx, P in enumerate(matrices):
+        if P.shape != (dim, dim):
+            raise ValueError(
+                f"All POVM elements must have shape ({dim}, {dim})"
+                f" but got {P.shape} at index {idx}"
+            )
+        hermitian = is_hermitian(P, tolerance=tolerance)
+        psd = is_positive_semidefinite(P, tolerance=tolerance)
+        eigvals = eigenvalues_of_matrix(P)
+
+        all_hermitian = all_hermitian and hermitian
+        all_psd = all_psd and psd
+
+    if verbose:
+        print(f"POVM element {idx} validation report")
+        print("=" * 60)
+        print(f"Element P_{idx}")
+        pretty_matrix(P, f"P_{idx}")
+        print(f"Hermitian?    {hermitian}")
+        print(f"PSD?          {psd}")
+        print(f"Eigenvalues:  {eigvals}")
+        print(f"Identity:     {np.allclose(P, identity)}")
+        print()
+
+    total = povm_sum(matrices)
+    sums_to_identity = np.allclose(total, identity, atol=tolerance)
+
+    if verbose:
+        pretty_matrix(total, "POVM sum")
+        print(f"POVM sum = 1?    {sums_to_identity}")
+        print()
+
+    return bool(all_hermitian and all_psd and sums_to_identity)
 
 
+def measurement_probabilities(rho: MatrixLike, povm_elements: POVM, tolerance: float = 1e-10,
+                              validate: bool = True) -> RealVector:
+    """
+    Calculate measurement outcome probs for a POVM
+    for density matrix rho and povm elements "p_a", the probability
+    of outcome "a" is
+    p(a) = Tr(P_a rho)
 
+    :param rho: density matrix (d,d)
+    :param povm_elements:  sequence of povm elements each of shape (d,d)
+    :param tolerance: numerical constraint
+    :param validate: bool, optional
+    :return: RealVector, 1d array of measurement probabilites
+    ValueError: if dimensions are inconsistent, or povm is not valid
+
+    NOTE: small img parts from floating point numbers are ignored using np.real_if_close
+    """
+    rho_mat = to_numpy_matrix(rho)
+    dim = matrix_dimension(rho_mat)
+
+    if validate:
+        valid_povm = validate_povm(povm_elements, tolerance=tolerance, name="POVM", verbose=False)
+        if not valid_povm:
+            raise ValueError("POVM is not valid")
+    probs: list[float] = []
+    for idx, P in enumerate(povm_elements):
+        P_mat = to_numpy_matrix(P)
+
+        if P_mat.shape != (dim, dim):
+            raise ValueError(
+                f"POVM element {idx} must have shape ({dim}, {dim})"
+                f" but got {P_mat.shape}"
+            )
+        probability = np.trace(P_mat @ rho_mat)
+        probability = np.real_if_close(probability)
+        probs.append(probability)
+    probs_array = np.asarray(probs, dtype=np.float64)
+    probs_array[np.abs(probs_array) < tolerance] = 0
+    return probs_array
+
+
+def measurement_channel_output(rho: MatrixLike, povm_elements: POVM, tolerance=1e-10) -> ComplexMatrix:
+    """
+    return classical output density matrix of a measurement channel
+    rho -> sum_a Tr(P_a rho) |a><a|
+    this produces a diagonal matrix, whose diagonal entries are the measurement probabilities
+    :param rho: MatrixLike,
+    :param povm_elements:POVM
+    :param tolerance:numerical constraint
+    :return: diagonal matrix coontaining the classical outcome probabilities
+
+    NOTE: the output is diagonal because after measurement, we keep only classical information
+    about which outcome occured
+    """
+    probabilities = measurement_probabilities(rho, povm_elements, tolerance=tolerance, validate=True)
+    return np.diag(probabilities).astype(np.complex128)
+
+
+# def bloch_coords_from_dm(rho:MatrixLike, tolerance:float=1e-10)->RealVector:
+#     """
+#     Compute the bloch vector of a one-qubit density matrix
+#     any one-qubit density matrix rho can be represented in Bloch coordinates as
+#     rho = 1/2 * (I + r_x X + r_y Y + r_z Z)
+#     where
+#         r_x = Tr(rho X)
+#         r_y = Tr(rho Y)
+#         r_z = Tr(rho Z)
+#     :param rho: MatrixLike, one qubit matrix of shape (2,2)
+#     :param tolerance:
+#     :return: bloch vector of shape (3,)
+#     ValueError: if rho is not a one-qubit density matrix (2,2)
+#
+#
+#     """
+
+def matrix_square_root_psd(matrix: MatrixLike, tolerance: float = 1e-10) -> ComplexMatrix:
+    """
+    compute square root of a psd hermitian matrix
+    For a PSD matrix P with spectral decomposition
+        P = V diag(lambda_i) V†
+    the square root is
+        sqrt(P) = V diag(sqrt(lambda_i)) V†
+    :param matrix: psd hermitian matrix
+    :param tolerance:
+    :return: sqrt of input matrix
+    ValueError: if the input is not hermitian or psd
+    """
+    mat = to_numpy_matrix(matrix)
+
+    if not is_hermitian(mat, tol=tolerance):
+        raise ValueError("Matrix square root requires a Hermitian matrix.")
+    if not is_positive_semidefinite(mat, tol=tolerance):
+        raise ValueError("Matrix square root requires a positive semidefinite matrix.")
+    eigenvalues, eigenvectors = np.linalg.eigh(mat)
+    # Clip tiny negative numerical values.
+    eigenvalues = np.maximum(eigenvalues, 0.0)
+    sqrt_matrix = eigenvectors @ np.diag(np.sqrt(eigenvalues)) @ eigenvectors.conj().T
+    return sqrt_matrix.astype(np.complex128)
+
+
+def post_measurement_state_via_sqrtP(rho: MatrixLike, P: MatrixLike, tolerance: float = 1e-10) -> tuple[
+    float, ComplexMatrix]:
+    """
+    compute post measurement state using the sqrt(P) update rule
+    For POVM element P_a, one possible non-destructive update rule is
+        rho_a = sqrt(P_a) rho sqrt(P_a) / Tr(P_a rho)
+    :param rho: matrix
+    :param P:matrix
+    :param tolerance:
+    :return:tuple (probability, post measurement state)
+    ValueError: if outcome probability is approx 0
+
+    NOTE: A povm alone gives probabilities.
+    the post measurement state also depends on the measurement instrument
+    the sqrt(P) rule is one natural choice, but not only possible choice
+    """
+    rho_mat = to_numpy_matrix(rho)
+    P_mat = to_numpy_matrix(P)
+
+    if rho_mat.shape != P_mat.shape:
+        raise ValueError(
+            f"POVM element P_a must have shape ({rho_mat.shape[0]}, {rho_mat.shape[1]})"
+            f" but got {P_mat.shape}"
+        )
+    sqrt_P = matrix_square_root_psd(P_mat, tolerance=tolerance)
+    probability = np.trace(P_mat @ rho_mat)
+    probability = float(np.real_if_close(probability))
+    if probability < tolerance:
+        raise ValueError("Outcome probability is approx 0")
+    post_state = sqrt_P @ rho_mat @ sqrt_P.conj().T
+    post_state = post_state / probability
+    return probability, post_state.astype(np.complex128)
 
 
 if __name__ == "__main__":
@@ -166,3 +395,17 @@ if __name__ == "__main__":
     print("*" * 25 + "Function-10" + "*" * 25)
     print(normalize_statevector(np.array([1, 0, 0, 0])))
     print(normalize_statevector(np.array([1, 0, 0, 0]), tolerance=1e-10))
+    print("*" * 25 + "Function-11" + "*" * 25)
+    print(standard_basis_projectors())
+    print("*" * 25 + "Function-12" + "*" * 25)
+    print(povm_sum([np.array([[1, 0], [0, 0]]), np.array([[0, 0], [0, 1]])]))
+    print("*" * 25 + "Function-13" + "*" * 25)
+    print(validate_povm([np.array([[1, 0], [0, 0]]), np.array([[0, 0], [0, 1]])]))
+    print("*" * 25 + "Function-14" + "*" * 25)
+    print(validate_povm([np.array([[1, 0], [0, 0]]), np.array([[0, 0], [0, 1]])], tolerance=1e-10))
+    print("*" * 25 + "Function-15" + "*" * 25)
+    print(
+        measurement_probabilities(np.array([[1, 0], [0, 0]]), [np.array([[1, 0], [0, 0]]), np.array([[0, 0], [0, 1]])]))
+    print("*" * 25 + "Function-16" + "*" * 25)
+    print(measurement_channel_output(np.array([[1, 1], [1, 1]]),
+                                     [np.array([[1, 0], [0, 0]]), np.array([[0, 0], [0, 1]])]))
