@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 from numpy.typing import ArrayLike, NDArray
 from qiskit import QuantumCircuit
-from qiskit.quantum_info import (Statevector, DensityMatrix, operators,
+from qiskit.quantum_info import (Statevector, DensityMatrix, Operator,
                                  partial_trace, Pauli, state_fidelity)
 
 from src.QuInfo.utils.DensityMatrix import (to_numpy_matrix, pretty_matrix, is_square_matrix, is_hermitian,
@@ -20,6 +20,20 @@ ComplexMatrix: TypeAlias = NDArray[np.complex128]
 Complexvector: TypeAlias = NDArray[np.complex128]
 RealVector: TypeAlias = NDArray[np.float64]
 POVM: TypeAlias = Sequence[MatrixLike]
+
+
+def matrix_dimension(matrix: MatrixLike)->int:
+    """
+    return hilbert-space dimention of the square matrix
+    :param matrix: square matrix
+    :return: matrix dimension
+    """
+    mat = to_numpy_matrix(matrix)
+    if not is_square_matrix(mat):
+        raise ValueError(
+            f"Expected a square matrix, got {mat.ndim}D matrix with shape {mat.shape}"
+        )
+    return mat.shape[0]
 
 
 def to_complex_vector(vector: VectorLike) -> Complexvector:
@@ -365,6 +379,185 @@ def post_measurement_state_via_sqrtP(rho: MatrixLike, P: MatrixLike, tolerance: 
     post_state = post_state / probability
     return probability, post_state.astype(np.complex128)
 
+def partial_measurement_probabilities(rho_XZ: MatrixLike, povm_X:POVM, subsystem_dim: int = 2, tolerance: float=1e-10)->RealVector:
+    """
+    Compute probabilities when measuring only the first subsystem.
+    :param rho_XZ: matrix (full density matrix of the combined system of X and Z subsystems)
+    :param povm_X: povm (povm of the X subsystem)
+    :param subsystem_dim: int, optional (dimenstion of the second subsystem)
+    :param tolerance: numerical constraint
+    :return: realvector (1d array) of partial measurement probabilities (for the first subsystem)
+    ValueError: if dimensions are inconsistent, or povm is not valid
+
+    NOTE: what we want here is, we want to measure the probability of measuring the first subsystem
+    for bipartite system of two qubits, the shape is (4,4), in this case the dimension of the second subsystem 2
+    """
+    rho_mat = to_numpy_matrix(rho_XZ)
+    dim_total = matrix_dimension(rho_mat)
+
+    I = np.eye(subsystem_dim, dtype=np.complex128)
+    probabilities: list[float] = []
+    for idx, P in enumerate(povm_X):
+        P_mat = to_numpy_matrix(P)
+        M = np.kron(P_mat, I)
+        if M.shape != (dim_total, dim_total):
+            raise ValueError(
+                f"Measurement operator for POVM element {idx} must have shape ({M.shape})"
+                f" but got {rho_mat.shape}"
+            )
+        probability = np.trace(M @ rho_mat)
+        probability = float(np.real_if_close(probability))
+        if abs(probability) < tolerance:
+            probability = 0
+        probabilities.append(probability)
+    return np.asarray(probabilities, dtype=np.float64)
+
+
+def conditional_state_of_second_qubit(rho_XZ: MatrixLike, P:MatrixLike, tolerance:float=1e-10)->[float, ComplexMatrix]:
+    """
+    compute the conditional state of the second qubit after measuring the first qubit
+    if the first qubut is measured with povm element P_a, the conditional state of the second qubit can be given as,
+    sigma_Z^(a) = Tr_X[(P_a ⊗ I) rho_XZ] / Tr[(P_a ⊗ I) rho_XZ]
+
+    :param rho_XZ: matrix (full density matrix of the combined system of X and Z subsystems)
+    :param P: one qubit povm element action on the first qubit
+    :param tolerance:
+    :return: tuple (probability, conditional state)
+                probability: prob of the measurement outcome
+                conditional_state: resulting state of the second qubit
+    ValueError: if the probability of the outcome is approximately zero
+
+    NOTE: for the qntangled states, measuring the first subsystem can change our conditional description of the second subsystem
+    """
+    rho_mat= to_numpy_matrix(rho_XZ)
+    P_mat = to_numpy_matrix(P)
+    if rho_mat.shape != (4,4):
+        raise ValueError(f"rho_XZ must have shape (4,4) but got {rho_mat.shape}")
+    if P_mat.shape != (2,2):
+        raise ValueError(f"P must have shape (2,2) but got {P_mat.shape}")
+    I = np.eye(2, dtype=np.complex128)
+    M = np.kron(P_mat, I)
+
+    unnormalized_joint = M @ rho_mat
+    probability = np.trace(unnormalized_joint)
+    probability = float(np.real_if_close(probability))
+
+    if probability < tolerance:
+        raise ValueError("outcome probability is approximately zero")
+    reduced_state = partial_trace(DensityMatrix(unnormalized_joint), [0]).data
+    conditional_state = reduced_state / probability
+
+    return probability, conditional_state.astype(np.complex128)
+
+def validate_probability_vector(probabilities: ArrayLike, tolerence:float=1e-10)->RealVector:
+    """
+    Validate and return a classical probability vector
+    :param probabilities: ArrayLike, 1d array of probabilities
+    :param tolerence:
+    :return: validated probability vector
+    VCalueError: if probabilities are negative or do not sum to 1
+    """
+    probs = np.asarray(probabilities, dtype=np.float64)
+    if probs.ndim != 1:
+        raise ValueError(f"probabilities must be a 1d array, but got {probs.ndim}d array")
+    if np.any(probs < -tolerence):
+        raise ValueError(f"probabilities must be non-negative, but got {probs}")
+    probs[np.abs(probs)<=tolerence] = 0
+    total = np.sum(probs)
+    if not np.isclose(total, 1, atol=tolerence):
+        raise ValueError(f"probabilities must sum to 1, but got {total}")
+
+    probs = probs / np.sum(probs)
+
+    return probs.astype(np.float64)
+
+def sample_measurement(probabilities: ArrayLike, shots: int =100, rng: np.random.Generator | None = None) ->NDArray[np.int64]:
+    """
+    sample classical measurement outcomes from a prabability distribution
+    :param probabilities: array, probability vector
+    :param shots: int, number of samples
+    :param rng: numpy random number generator, if None, then default generator is used
+    :return: array of sample outcomes
+    ValueError: if probabilities are not valid
+    NOTE: if the probability ie [.7, .3] and shots are 1000, then outcom 0 will appear 700 times, and outcome 1 300 times
+    """
+    if shots <= 0:
+        raise ValueError(f"shots must be positive, but got {shots}")
+    probs  = validate_probability_vector(probabilities)
+    if rng is None:
+        rng = np.random.default_rng(123)
+    outcomes = np.arange(len(probs), dtype=np.int64)
+    samples = rng.choice(outcomes, size=shots, p=probs)
+    return samples.astype(np.int64)
+
+def estimate_exception_from_pm1(samples:ArrayLike, plus_label:int=0, minus_label: int=1)->float:
+    """
+    estimate an expectation value from two outcome samples
+    The labels are mapped as:
+        plus_label  -> +1
+        minus_label -> -1
+    :param samples: array, sample measurement outcomes
+    :param plus_label:
+    :param minus_label:
+    :return: estimated expectation value
+
+    NOTE: this is to estimate Pauli expectation values such as <X>, <Y>, <Z> from measurement date
+    """
+    sample_array = np.asarray(samples, dtype=np.int64)
+    allowed = {plus_label, minus_label}
+    observed = set(sample_array.tolist())
+
+    if not observed.issubset(allowed):
+        raise ValueError(f"samples must contain only {plus_label} and {minus_label} but got {observed}")
+
+    values = np.where(sample_array == plus_label, 1, -1)
+    return float(np.mean(values))
+
+def ancilla_measurement_distribution_via_cnot(system_state: Statevector)->tuple[ComplexMatrix, RealVector]:
+    """
+    Implement a simple ancilla-based measurement experiment using CNOT
+
+    :param system_state: statevector,  one qubit qiskit statevector for the system qubit
+    :return: tuple ( ancilla density matrix, ancilla probabilities)
+
+    NOTE:
+    consider the experiment:
+    1. Prepare system qubit in the given state.
+    2. Prepare ancilla qubit in |0>.
+    3. Apply CNOT with system as control and ancilla as target.
+    4. Trace out the system and inspect the ancilla probabilities.
+
+    something like Naimark-style,
+    system + ancilla + unitary + standard measurement
+    It is not the full generic POVM implementation, but it is a good pattern
+    """
+
+    if system_state.dim != 2:
+        raise ValueError(f"system_state must be a one-qubit statevector, but got {system_state.dim} qubits")
+    ancilla_zero = Statevector.from_label("0")
+
+    joint_state = system_state.tensor(ancilla_zero)
+
+    cnot = QuantumCircuit(2)
+    cnot.cx(0,1)
+
+    U = Operator(cnot)
+    final_state = joint_state.evolve(U)
+    final_density_matrix = DensityMatrix(final_state)
+
+    ancilla_dm = partial_trace(final_density_matrix, [0]).data
+    probabilities = np.real_if_close(np.diag(ancilla_dm)).astype(np.float)
+
+    return ancilla_dm.astype(np.complex128), probabilities.astype(np.float64)
+
+
+
+
+
+
+
+
+
 
 if __name__ == "__main__":
     print("*" * 25 + "Function-1" + "*" * 25)
@@ -378,17 +571,17 @@ if __name__ == "__main__":
     print(is_hermitian(np.array([[1, 2, 3], [3, 4, 5], [5, 6, 7]])))
     print(is_hermitian(np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])))
     print("*" * 25 + "Function-5" + "*" * 25)
-    #print(eigvals_hermitian(np.array([[1, 2, 3], [3, 4, 5], [5, 6, 7]])))
-    #print(eigvals_hermitian(np.array([[1, 2, 3], [3, 4, 5]])))
+    # print(eigvals_hermitian(np.array([[1, 2, 3], [3, 4, 5], [5, 6, 7]])))
+    # print(eigvals_hermitian(np.array([[1, 2, 3], [3, 4, 5]])))
     print("*" * 25 + "Function-6" + "*" * 25)
-    #print(is_positive_semidefinite(np.array([[1, 2, 3], [3, 4, 5], [5, 6, 7]])))
-    #print(is_positive_semidefinite(np.array([[1, 2, 3], [3, 4, 5]])))
+    # print(is_positive_semidefinite(np.array([[1, 2, 3], [3, 4, 5], [5, 6, 7]])))
+    # print(is_positive_semidefinite(np.array([[1, 2, 3], [3, 4, 5]])))
     print("*" * 25 + "Function-7" + "*" * 25)
     print(is_density_matrix(np.array([[1, 2, 3], [3, 4, 5], [5, 6, 7]])))
     print(is_density_matrix(np.array([[1, 2, 3], [3, 4, 5]])))
     print("*" * 25 + "Function-8" + "*" * 25)
     print(normalize_density_matrix(np.array([[1, 2, 3], [3, 4, 5], [5, 6, 7]])))
-    #print(normalize_density_matrix(np.array([[1, 2, 3], [3, 4, 5]])))
+    # print(normalize_density_matrix(np.array([[1, 2, 3], [3, 4, 5]])))
     print("*" * 25 + "Function-9" + "*" * 25)
     print(projector_from_state(np.array([1, 0, 0, 0])))
     print(projector_from_state(np.array([1, 0, 0, 0]), normalize=False))
@@ -409,3 +602,20 @@ if __name__ == "__main__":
     print("*" * 25 + "Function-16" + "*" * 25)
     print(measurement_channel_output(np.array([[1, 1], [1, 1]]),
                                      [np.array([[1, 0], [0, 0]]), np.array([[0, 0], [0, 1]])]))
+    print("*" * 25 + "Function-17" + "*" * 25)
+    print(
+        measurement_probabilities(np.array([[1, 0], [0, 0]]), [np.array([[1, 0], [0, 0]]), np.array([[0, 0], [0, 1]])],
+                                  tolerance=1e-10))
+    print("*" * 25 + "Function-18" + "*" * 25)
+    print(measurement_channel_output(np.array([[1, 1], [1, 1]]),
+                                     [np.array([[1, 0], [0, 0]]), np.array([[0, 0], [0, 1]])], tolerance=1e-10))
+    print("*" * 25 + "Function-19" + "*" * 25)
+    print(partial_measurement_probabilities(np.array([[1, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]),
+                                            [np.array([[1, 0], [0, 0]]), np.array([[0, 0], [0, 1]])]))
+    print("*" * 25 + "Function-20" + "*" * 25)
+    print(partial_measurement_probabilities(np.array([[1, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]),
+                                            [np.array([[1, 0], [0, 0]]), np.array([[0, 0], [0, 1]])], tolerance=1e-10))
+    print("*" * 25 + "Function-21" + "*" * 25)
+    print(conditional_state_of_second_qubit(np.array([[1, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]),
+                                            np.array([[1, 0], [0, 0]])))
+    print("*" * 25 + "Function-22" + "*" * 25)
