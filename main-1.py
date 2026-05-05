@@ -13,7 +13,11 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+from numpy.typing import NDArray
+from qiskit.quantum_info import DensityMatrix as QiskitDensityMatrix
 from qiskit.quantum_info import Statevector
+from qiskit.quantum_info import partial_trace as qiskit_partial_trace
+from typing import Callable, Sequence, TypeAlias
 
 import src.QuInfo.utils.genMeasurements as gen_measurements
 from src.QuInfo.utils.DensityMatrix import (
@@ -58,6 +62,10 @@ from src.QuInfo.utils.genMeasurements import (
 )
 
 np.set_printoptions(precision=4, suppress=True)
+
+MatrixLike: TypeAlias = NDArray[np.complexfloating] | Sequence[Sequence[complex]]
+KrausList: TypeAlias = Sequence[MatrixLike]
+ChannelFunction: TypeAlias = Callable[[MatrixLike], NDArray[np.complexfloating]]
 
 
 def install_local_compatibility_shims() -> None:
@@ -108,6 +116,190 @@ def run_safely(label: str, func) -> None:
     else:
         if result is not None:
             print(result)
+
+
+def apply_unitary_channel(matrix: MatrixLike, unitary: MatrixLike) -> NDArray[np.complex128]:
+    rho = to_numpy_matrix(matrix)
+    unitary_matrix = to_numpy_matrix(unitary)
+
+    if rho.shape[0] != rho.shape[1]:
+        raise ValueError("Input matrix must be square.")
+    if unitary_matrix.shape != rho.shape:
+        raise ValueError(f"Unitary must have shape {rho.shape}, got {unitary_matrix.shape}.")
+
+    return unitary_matrix @ rho @ unitary_matrix.conj().T
+
+
+def convex_combine_channels(
+    channel_outputs: Sequence[MatrixLike],
+    probabilities: Sequence[float],
+    tolerance: float = 1e-10,
+) -> NDArray[np.complex128]:
+    if len(channel_outputs) == 0:
+        raise ValueError("Channel outputs list cannot be empty.")
+    if len(channel_outputs) != len(probabilities):
+        raise ValueError("Number of channel outputs and probabilities must match.")
+
+    probs = np.asarray(probabilities, dtype=np.float64)
+    if np.any(probs < -tolerance):
+        raise ValueError("Probabilities must be non-negative.")
+    if not np.isclose(np.sum(probs), 1, atol=tolerance):
+        raise ValueError(f"Probabilities must sum to 1, got {np.sum(probs)}.")
+
+    outputs = [to_numpy_matrix(output) for output in channel_outputs]
+    first_shape = outputs[0].shape
+    if any(output.shape != first_shape for output in outputs):
+        raise ValueError("All channel outputs must have the same shape.")
+
+    total = np.zeros(first_shape, dtype=np.complex128)
+    for probability, output in zip(probs, outputs):
+        total += probability * output
+    return total
+
+
+def apply_kraus_channel(matrix: MatrixLike, kraus_ops: KrausList) -> NDArray[np.complex128]:
+    rho = to_numpy_matrix(matrix)
+    if len(kraus_ops) == 0:
+        raise ValueError("Kraus operators list cannot be empty.")
+
+    output_dim = to_numpy_matrix(kraus_ops[0]).shape[0]
+    out = np.zeros((output_dim, output_dim), dtype=np.complex128)
+
+    for kraus_like in kraus_ops:
+        kraus = to_numpy_matrix(kraus_like)
+        if kraus.shape[1] != rho.shape[0]:
+            raise ValueError(f"Kraus operator has incompatible shape {kraus.shape}.")
+        out += kraus @ rho @ kraus.conj().T
+
+    return out
+
+
+def kraus_completeness_check(kraus_ops: KrausList) -> NDArray[np.complex128]:
+    if len(kraus_ops) == 0:
+        raise ValueError("Kraus operators list cannot be empty.")
+
+    first = to_numpy_matrix(kraus_ops[0])
+    input_dim = first.shape[1]
+    total = np.zeros((input_dim, input_dim), dtype=np.complex128)
+
+    for kraus_like in kraus_ops:
+        kraus = to_numpy_matrix(kraus_like)
+        if kraus.shape[1] != input_dim:
+            raise ValueError(f"Kraus operator has incompatible shape {kraus.shape}.")
+        total += kraus.conj().T @ kraus
+
+    return total
+
+
+def reset_channel_qubit(matrix: MatrixLike) -> NDArray[np.complex128]:
+    rho = to_numpy_matrix(matrix)
+    if rho.shape != (2, 2):
+        raise ValueError(f"Reset channel expects a 2x2 matrix, got {rho.shape}.")
+
+    ket0 = np.array([[1], [0]], dtype=np.complex128)
+    return np.trace(rho) * (ket0 @ ket0.conj().T)
+
+
+def dephasing_channel_qubit(matrix: MatrixLike) -> NDArray[np.complex128]:
+    rho = to_numpy_matrix(matrix)
+    if rho.shape != (2, 2):
+        raise ValueError(f"Dephasing channel expects a 2x2 matrix, got {rho.shape}.")
+
+    out = np.array(rho, copy=True, dtype=np.complex128)
+    out[0, 1] = 0
+    out[1, 0] = 0
+    return out
+
+
+def depolarizing_channel_qubit(matrix: MatrixLike) -> NDArray[np.complex128]:
+    rho = to_numpy_matrix(matrix)
+    if rho.shape != (2, 2):
+        raise ValueError(f"Depolarizing channel expects a 2x2 matrix, got {rho.shape}.")
+
+    return np.trace(rho) * np.eye(2, dtype=np.complex128) / 2
+
+
+def noisy_dephasing_channel_qubit(matrix: MatrixLike, epsilon: float) -> NDArray[np.complex128]:
+    if not 0 <= epsilon <= 1:
+        raise ValueError("epsilon must be in [0, 1].")
+
+    rho = to_numpy_matrix(matrix)
+    return (1 - epsilon) * rho + epsilon * dephasing_channel_qubit(rho)
+
+
+def noisy_depolarizing_channel_qubit(matrix: MatrixLike, epsilon: float) -> NDArray[np.complex128]:
+    if not 0 <= epsilon <= 1:
+        raise ValueError("epsilon must be in [0, 1].")
+
+    rho = to_numpy_matrix(matrix)
+    return (1 - epsilon) * rho + epsilon * depolarizing_channel_qubit(rho)
+
+
+def apply_channel_to_first_qubit(
+    matrix: MatrixLike,
+    channel_func: ChannelFunction,
+) -> NDArray[np.complex128]:
+    rho_ab = to_numpy_matrix(matrix)
+    if rho_ab.shape != (4, 4):
+        raise ValueError(f"Expected a two-qubit density matrix with shape (4, 4), got {rho_ab.shape}.")
+
+    blocks = [
+        (np.array([[1, 0], [0, 0]], dtype=np.complex128), rho_ab[0:2, 0:2]),
+        (np.array([[0, 1], [0, 0]], dtype=np.complex128), rho_ab[0:2, 2:4]),
+        (np.array([[0, 0], [1, 0]], dtype=np.complex128), rho_ab[2:4, 0:2]),
+        (np.array([[0, 0], [0, 1]], dtype=np.complex128), rho_ab[2:4, 2:4]),
+    ]
+
+    out = np.zeros_like(rho_ab, dtype=np.complex128)
+    for left, right in blocks:
+        out += np.kron(channel_func(left), right)
+    return out
+
+
+def choi_from_definition(channel_func: ChannelFunction, dim: int = 2) -> NDArray[np.complex128]:
+    if dim <= 0:
+        raise ValueError("dim must be positive.")
+
+    choi = np.zeros((dim * dim, dim * dim), dtype=np.complex128)
+    for a in range(dim):
+        for b in range(dim):
+            basis = np.zeros((dim, dim), dtype=np.complex128)
+            basis[a, b] = 1
+            choi += np.kron(basis, channel_func(basis))
+
+    return choi
+
+
+def partial_trace_output_system_of_choi(
+    choi_matrix: MatrixLike,
+    input_dim: int = 2,
+    output_dim: int = 2,
+) -> NDArray[np.complex128]:
+    choi = to_numpy_matrix(choi_matrix)
+    expected_shape = (input_dim * output_dim, input_dim * output_dim)
+    if choi.shape != expected_shape:
+        raise ValueError(f"Expected Choi shape {expected_shape}, got {choi.shape}.")
+
+    reshaped = choi.reshape(input_dim, output_dim, input_dim, output_dim)
+    traced = np.zeros((input_dim, input_dim), dtype=np.complex128)
+    for output_index in range(output_dim):
+        traced += reshaped[:, output_index, :, output_index]
+
+    return traced
+
+
+def apply_channel_via_choi(matrix: MatrixLike, choi_matrix: MatrixLike) -> NDArray[np.complex128]:
+    rho = to_numpy_matrix(matrix)
+    choi = to_numpy_matrix(choi_matrix)
+
+    if rho.shape != (2, 2):
+        raise ValueError(f"Input rho must have shape (2, 2), got {rho.shape}.")
+    if choi.shape != (4, 4):
+        raise ValueError(f"Choi matrix must have shape (4, 4), got {choi.shape}.")
+
+    temp = np.kron(rho.T, np.eye(2, dtype=np.complex128)) @ choi
+    output = qiskit_partial_trace(QiskitDensityMatrix(temp), [0]).data
+    return np.asarray(output, dtype=np.complex128)
 
 
 def showcase_density_matrix_helpers() -> None:
@@ -237,10 +429,48 @@ def showcase_general_measurements() -> None:
     show_result("Ancilla standard-basis probabilities", ancilla_probs)
 
 
+def showcase_quantum_channels() -> None:
+    section("Quantum channel helpers")
+
+    rho = np.array([[1, 2], [3, 4]], dtype=np.complex128)
+    identity = np.eye(2, dtype=np.complex128)
+    bit_flip = np.array([[0, 1], [1, 0]], dtype=np.complex128)
+    dephasing_choi = choi_from_definition(dephasing_channel_qubit)
+
+    subsection("Unitary, convex, and Kraus-channel examples")
+    show_result("apply_unitary_channel(rho, I)", apply_unitary_channel(rho, identity))
+    show_result(
+        "convex_combine_channels([rho, 2*rho], [0.5, 0.5])",
+        convex_combine_channels([rho, 2 * rho], [0.5, 0.5]),
+    )
+    show_result("apply_kraus_channel(rho, [I, X])", apply_kraus_channel(rho, [identity, bit_flip]))
+    show_result("kraus_completeness_check([I, X])", kraus_completeness_check([identity, bit_flip]))
+
+    subsection("Standard one-qubit channels")
+    show_result("reset_channel_qubit(rho)", reset_channel_qubit(rho))
+    show_result("dephasing_channel_qubit(rho)", dephasing_channel_qubit(rho))
+    show_result("depolarizing_channel_qubit(rho)", depolarizing_channel_qubit(rho))
+    show_result("noisy_dephasing_channel_qubit(rho, 0.5)", noisy_dephasing_channel_qubit(rho, 0.5))
+    show_result("noisy_depolarizing_channel_qubit(rho, 0.5)", noisy_depolarizing_channel_qubit(rho, 0.5))
+
+    subsection("Local channels and Choi representation")
+    show_result(
+        "apply_channel_to_first_qubit(I_4/4, dephasing_channel_qubit)",
+        apply_channel_to_first_qubit(np.eye(4, dtype=np.complex128) / 4, dephasing_channel_qubit),
+    )
+    show_result("choi_from_definition(dephasing_channel_qubit)", dephasing_choi)
+    show_result(
+        "partial_trace_output_system_of_choi(choi)",
+        partial_trace_output_system_of_choi(dephasing_choi),
+    )
+    show_result("apply_channel_via_choi(rho, choi)", apply_channel_via_choi(rho, dephasing_choi))
+
+
 def main() -> None:
     install_local_compatibility_shims()
     showcase_density_matrix_helpers()
     showcase_general_measurements()
+    showcase_quantum_channels()
 
 
 if __name__ == "__main__":

@@ -1,9 +1,14 @@
 # QuantumInformation
 
-This repository is a small collection of quantum information utilities written
-with NumPy and Qiskit. The main goal is to keep the basic objects easy to inspect:
-density matrices, Bloch vectors, projective measurements, POVMs, post-measurement
-states, and a simple ancilla-based measurement example.
+This repository is an attempt to practically implement the theory taught in
+IBM's course, **General Formulation of Quantum Information**. The code is written
+with NumPy and Qiskit so the mathematical objects from the course can be built,
+inspected, and tested directly.
+
+The main goal is to keep the basic objects easy to inspect: density matrices,
+Bloch vectors, projective measurements, POVMs, post-measurement states, quantum
+channels, Kraus operators, Choi matrices, and a simple ancilla-based measurement
+example.
 
 Most of the code is meant to be readable first. It is useful for learning,
 testing small ideas, and checking the math step by step.
@@ -18,6 +23,10 @@ QuantumInformation/
 |-- plots/
 |   |-- Figure_1.png
 |   `-- main-1-bloch-showcase.png
+|-- research/
+|   |-- DensityMatrix.ipynb
+|   |-- GeneralMeasurements.ipynb
+|   `-- QuantumChannels.ipynb
 `-- src/
     `-- QuInfo/
         `-- utils/
@@ -67,6 +76,26 @@ Some useful things inside this file:
 - Estimate a `+1/-1` expectation value from samples.
 - Demonstrate a simple ancilla measurement using a CNOT circuit.
 
+### Quantum channels
+
+The quantum-channel work is currently demonstrated in `research/QuantumChannels.ipynb`
+and in the `main-1.py` showcase. It covers closed-system unitary evolution,
+classical convex combinations of channel outputs, Kraus representations, standard
+one-qubit noise channels, local channels on one subsystem of a two-qubit state,
+and Choi-matrix based channel checks.
+
+Some useful ideas demonstrated there:
+
+- Apply a unitary channel with `U rho U^dagger`.
+- Combine channel outputs using classical probabilities.
+- Apply channels from Kraus operators and check the completeness relation.
+- Use reset, dephasing, depolarizing, noisy dephasing, and noisy depolarizing
+  channels.
+- Apply a one-qubit channel to the first qubit of a two-qubit state.
+- Build a Choi matrix from the channel definition.
+- Check trace preservation by tracing out the output system of a Choi matrix.
+- Apply a channel using its Choi representation.
+
 ## Showcase scripts
 
 ### `main.py`
@@ -76,15 +105,18 @@ matrix and measurement utilities.
 
 ### `main-1.py`
 
-This is a more complete showcase file. It is organized into two main sections:
+This is a more complete showcase file. It is organized into three main sections:
 
 - `DensityMatrix.py helpers`
 - `genMeasurements.py helpers`
+- `Quantum channel helpers`
 
 It walks through density-matrix diagnostics, state labels, standard-basis
 probabilities, Bloch-vector plotting, projectors, POVMs, measurement channels,
 partial measurements, conditional states, sampling, post-measurement states, and
-the ancilla example.
+the ancilla example. It also demonstrates unitary channels, Kraus channels,
+one-qubit noise channels, local channels on a two-qubit state, and Choi-matrix
+representations.
 
 Running `main-1.py` also writes this plot:
 
@@ -169,6 +201,20 @@ samples = sample_measurement(probs, shots=20)
 
 print(samples)
 print(estimate_exception_from_pm1(samples))
+```
+
+### Apply a dephasing channel through its Choi matrix
+
+The Choi-matrix example is demonstrated in both places:
+
+```powershell
+python main-1.py
+```
+
+and in:
+
+```text
+research/QuantumChannels.ipynb
 ```
 
 ## Figure showcase
