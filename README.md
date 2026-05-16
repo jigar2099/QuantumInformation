@@ -7,7 +7,8 @@ inspected, and tested directly.
 
 The main goal is to keep the basic objects easy to inspect: density matrices,
 Bloch vectors, projective measurements, POVMs, post-measurement states, quantum
-channels, Kraus operators, Choi matrices, and a simple ancilla-based measurement
+channels, Kraus operators, Choi matrices, purifications, Schmidt
+decompositions, fidelity calculations, and a simple ancilla-based measurement
 example.
 
 Most of the code is meant to be readable first. It is useful for learning,
@@ -26,6 +27,7 @@ QuantumInformation/
 |-- research/
 |   |-- DensityMatrix.ipynb
 |   |-- GeneralMeasurements.ipynb
+|   |-- PurificationFidelity.ipynb
 |   `-- QuantumChannels.ipynb
 `-- src/
     `-- QuInfo/
@@ -76,13 +78,32 @@ Some useful things inside this file:
 - Estimate a `+1/-1` expectation value from samples.
 - Demonstrate a simple ancilla measurement using a CNOT circuit.
 
-### Quantum channels
+### `PurificationFidelity.py`
 
-The quantum-channel work is currently demonstrated in `research/QuantumChannels.ipynb`
-and in the `main-1.py` showcase. It covers closed-system unitary evolution,
-classical convex combinations of channel outputs, Kraus representations, standard
-one-qubit noise channels, local channels on one subsystem of a two-qubit state,
-and Choi-matrix based channel checks.
+This file is for purification, Schmidt decomposition, and fidelity utilities.
+It connects mixed-state density matrices with pure-state purifications and gives
+small helpers for checking the overlap and fidelity relationships used in
+Uhlmann-style arguments.
+
+Some useful things inside this file:
+
+- Compute the spectral decomposition of a density matrix.
+- Build a canonical purification from the spectral decomposition.
+- Build a canonical purification with a fixed ancilla dimension.
+- Recover a reduced density matrix by tracing out selected subsystems.
+- Compute a Schmidt decomposition of a bipartite pure state.
+- Reconstruct a statevector from Schmidt coefficients and vectors.
+- Generate and validate random unitary matrices.
+- Apply a unitary on the second subsystem of a bipartite state.
+- Compute pure-state overlap.
+- Compute density-matrix fidelity and root fidelity.
+
+### `QuantumChannels.py`
+
+This file is for quantum-channel utilities. It covers closed-system unitary
+evolution, classical convex combinations of channel outputs, Kraus
+representations, standard one-qubit noise channels, local channels on one
+subsystem of a two-qubit state, and Choi-matrix based channel checks.
 
 Some useful ideas demonstrated there:
 
@@ -105,18 +126,21 @@ matrix and measurement utilities.
 
 ### `main-1.py`
 
-This is a more complete showcase file. It is organized into three main sections:
+This is a more complete showcase file. It is organized into four main sections:
 
 - `DensityMatrix.py helpers`
 - `genMeasurements.py helpers`
+- `PurificationFidelity.py helpers`
 - `Quantum channel helpers`
 
 It walks through density-matrix diagnostics, state labels, standard-basis
 probabilities, Bloch-vector plotting, projectors, POVMs, measurement channels,
 partial measurements, conditional states, sampling, post-measurement states, and
-the ancilla example. It also demonstrates unitary channels, Kraus channels,
-one-qubit noise channels, local channels on a two-qubit state, and Choi-matrix
-representations.
+the ancilla example. It also demonstrates spectral decomposition, purification,
+partial trace recovery, Schmidt decomposition, reconstruction, subsystem unitary
+actions, overlap, manual fidelity, root fidelity, unitary channels, Kraus
+channels, one-qubit noise channels, local channels on a two-qubit state, and
+Choi-matrix representations.
 
 Running `main-1.py` also writes this plot:
 
@@ -201,6 +225,56 @@ samples = sample_measurement(probs, shots=20)
 
 print(samples)
 print(estimate_exception_from_pm1(samples))
+```
+
+### Purify a density matrix and recover the reduced state
+
+```python
+import numpy as np
+
+from src.QuInfo.utils.PurificationFidelity import (
+    canonical_purification_fixed_ancilla_dim,
+    reduced_system_from_purification,
+)
+
+rho = np.array(
+    [
+        [0.5, -0.3j],
+        [0.3j, 0.5],
+    ],
+    dtype=np.complex128,
+)
+
+psi = canonical_purification_fixed_ancilla_dim(rho, ancilla_dim=2)
+rho_recovered = reduced_system_from_purification(
+    psi,
+    system_dims=[2, 2],
+    trace_out_subsystems=[1],
+)
+
+print(psi)
+print(rho_recovered)
+```
+
+### Compute fidelity between density matrices
+
+```python
+import numpy as np
+
+from src.QuInfo.utils.DensityMatrix import densityMatrix_from_label
+from src.QuInfo.utils.PurificationFidelity import manual_fidelity, root_fidelity
+
+rho = np.array(
+    [
+        [0.5, -0.3j],
+        [0.3j, 0.5],
+    ],
+    dtype=np.complex128,
+)
+sigma = densityMatrix_from_label("+")
+
+print(manual_fidelity(rho, sigma))
+print(root_fidelity(rho, sigma))
 ```
 
 ### Apply a dephasing channel through its Choi matrix

@@ -60,6 +60,20 @@ from src.QuInfo.utils.genMeasurements import (
     validate_povm,
     validate_probability_vector,
 )
+from src.QuInfo.utils.PurificationFidelity import (
+    apply_unitary_on_second_subsystem,
+    canonical_purification_fixed_ancilla_dim,
+    canonical_purification_from_spectral_decomposition,
+    is_unitary,
+    manual_fidelity,
+    overlap,
+    random_unitary,
+    reconstruct_from_schmidt,
+    reduced_system_from_purification,
+    root_fidelity,
+    schmidt_decomposition,
+    spectral_decomposition_density_matrix,
+)
 
 np.set_printoptions(precision=4, suppress=True)
 
@@ -429,6 +443,95 @@ def showcase_general_measurements() -> None:
     show_result("Ancilla standard-basis probabilities", ancilla_probs)
 
 
+def showcase_purification_fidelity() -> None:
+    section("PurificationFidelity.py helpers")
+
+    rho_test = np.array(
+        [
+            [0.5, -0.3j],
+            [0.3j, 0.5],
+        ],
+        dtype=np.complex128,
+    )
+    sigma_test = densityMatrix_from_label("+")
+    bell_state = np.array([1, 0, 0, 1], dtype=np.complex128) / np.sqrt(2)
+
+    subsection("Spectral decomposition and canonical purification")
+    eigvals, eigvects = spectral_decomposition_density_matrix(rho_test)
+    purification, purification_eigvals, purification_eigvects = (
+        canonical_purification_from_spectral_decomposition(rho_test)
+    )
+    fixed_purification = canonical_purification_fixed_ancilla_dim(
+        rho_test,
+        ancilla_dim=2,
+        tolerance=1e-12,
+    )
+
+    pretty_matrix(rho_test, "rho_test")
+    show_result("spectral_decomposition_density_matrix(rho_test)", (eigvals, eigvects))
+    show_result(
+        "canonical_purification_from_spectral_decomposition(rho_test)",
+        (purification, purification_eigvals, purification_eigvects),
+    )
+    show_result(
+        "canonical_purification_fixed_ancilla_dim(rho_test, ancilla_dim=2)",
+        fixed_purification,
+    )
+    pretty_matrix(
+        reduced_system_from_purification(
+            fixed_purification,
+            system_dims=[2, 2],
+            trace_out_subsystems=[1],
+        ),
+        "Reduced system from fixed purification",
+    )
+
+    subsection("Schmidt decomposition and reconstruction")
+    schmidt_coefficients, left_vectors, right_vectors = schmidt_decomposition(
+        bell_state,
+        dim_x=2,
+        dim_y=2,
+    )
+    reconstructed_bell = reconstruct_from_schmidt(
+        schmidt_coefficients,
+        left_vectors,
+        right_vectors,
+    )
+    show_result("schmidt_decomposition(bell_state, dim_x=2, dim_y=2)", (
+        schmidt_coefficients,
+        left_vectors,
+        right_vectors,
+    ))
+    show_result("reconstruct_from_schmidt(...)", reconstructed_bell)
+    show_result("overlap(bell_state, reconstructed_bell, squared=True)", overlap(
+        bell_state,
+        reconstructed_bell,
+        squared=True,
+    ))
+
+    subsection("Ancilla unitary action and fidelity")
+    unitary_y = random_unitary(2, rng=np.random.default_rng(456))
+    pretty_matrix(unitary_y, "random_unitary(2)")
+    show_result("is_unitary(random_unitary(2))", is_unitary(unitary_y, tolerance=1e-12))
+    show_result(
+        "apply_unitary_on_second_subsystem(bell_state, unitary_y, dim_x=2, dim_y=2)",
+        apply_unitary_on_second_subsystem(
+            bell_state,
+            unitary_y,
+            dim_x=2,
+            dim_y=2,
+        ),
+    )
+    show_result("manual_fidelity(rho_test, densityMatrix_from_label('+'))", manual_fidelity(
+        rho_test,
+        sigma_test,
+    ))
+    show_result("root_fidelity(rho_test, densityMatrix_from_label('+'))", root_fidelity(
+        rho_test,
+        sigma_test,
+    ))
+
+
 def showcase_quantum_channels() -> None:
     section("Quantum channel helpers")
 
@@ -470,6 +573,7 @@ def main() -> None:
     install_local_compatibility_shims()
     showcase_density_matrix_helpers()
     showcase_general_measurements()
+    showcase_purification_fidelity()
     showcase_quantum_channels()
 
 

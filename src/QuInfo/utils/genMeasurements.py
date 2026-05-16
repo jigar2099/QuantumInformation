@@ -335,9 +335,9 @@ def matrix_square_root_psd(matrix: MatrixLike, tolerance: float = 1e-10) -> Comp
     """
     mat = to_numpy_matrix(matrix)
 
-    if not is_hermitian(mat, tol=tolerance):
+    if not is_hermitian(mat, tolerance=tolerance):
         raise ValueError("Matrix square root requires a Hermitian matrix.")
-    if not is_positive_semidefinite(mat, tol=tolerance):
+    if not is_positive_semidefinite(mat, tolerance=tolerance):
         raise ValueError("Matrix square root requires a positive semidefinite matrix.")
     eigenvalues, eigenvectors = np.linalg.eigh(mat)
     # Clip tiny negative numerical values.
